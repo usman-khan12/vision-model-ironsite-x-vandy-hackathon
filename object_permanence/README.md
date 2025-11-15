@@ -11,6 +11,7 @@ The object permanence module consists of several key components:
 3. **PerceptGateController**: Learns when to trust predictions vs. observations
 4. **TemporalFusion**: Fuses predicted and observed features based on occlusion state
 5. **ObjectTracker**: Maintains temporal memory for tracked objects
+6. **SpatialMemoryGrid** (Novel): Maintains 2D spatial grid with "ghost" representations of occluded objects
 
 ## Architecture
 
@@ -21,9 +22,14 @@ Previous Frame → Object Tracker → Previous Features
                                           ↓
                     ┌─────────────────────┴─────────────────────┐
                     ↓                                             ↓
-         OcclusionDetector                            ObjectPredictor
+         Spatial Memory Grid                            ObjectPredictor
+         (re-identify, get grid features)              (predict features)
                     ↓                                             ↓
-         Occlusion Factors                          Predicted Features
+         Enhanced Features                          Predicted Features
+                    ↓                                             ↓
+         OcclusionDetector                                      ↓
+                    ↓                                             ↓
+         Occlusion Factors                          Predictive Occupancy Maps
                     ↓                                             ↓
                     └─────────────────────┬─────────────────────┘
                                           ↓
@@ -35,10 +41,30 @@ Previous Frame → Object Tracker → Previous Features
                                           ↓
                                   Fused Features
                                           ↓
-                                  Object Tracker (update)
+                    ┌─────────────────────┴─────────────────────┐
+                    ↓                                             ↓
+         Object Tracker (update)                    Spatial Grid (update)
 ```
 
 ## Key Components
+
+### SpatialMemoryGrid (Novel Technique)
+
+**Purpose**: Maintains a 2D spatial grid that tracks object presence even when occluded.
+
+**Key Features**:
+- **Ghost Representations**: Maintains object features in grid cells even when occluded
+- **Predictive Occupancy Maps**: Predicts where objects should be spatially
+- **Cross-Reference Matching**: Re-identifies objects using spatial context
+- **Spatial Memory**: Explicit 2D representation of object locations
+
+**Benefits**:
+- Better re-identification after occlusion
+- Long-term spatial memory
+- Predictive capability for object locations
+- Multi-object handling in same spatial region
+
+See `SPATIAL_GRID_TECHNIQUE.md` for detailed documentation.
 
 ### OcclusionDetector
 

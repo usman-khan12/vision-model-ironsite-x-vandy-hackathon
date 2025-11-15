@@ -8,6 +8,7 @@ from .object_predictor import ObjectPredictor
 from .percept_gate_controller import PerceptGateController
 from .temporal_fusion import TemporalFusion
 from .object_tracker import ObjectTracker
+from .spatial_memory_grid import SpatialMemoryGrid
 from .integration import ObjectPermanenceModule
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     'PerceptGateController',
     'TemporalFusion',
     'ObjectTracker',
+    'SpatialMemoryGrid',
     'ObjectPermanenceModule',
 ]
 
