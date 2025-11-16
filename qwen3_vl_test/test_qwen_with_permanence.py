@@ -12,7 +12,7 @@ import numpy as np
 # Option 1: If object-permanence-module is in parent directory
 import sys
 from pathlib import Path
-parent_dir = Path(__file__).parent.parent.parent / "object-permanence-module"
+parent_dir = Path(__file__).parent.parent.parent / "object_permanence"
 if parent_dir.exists():
     sys.path.insert(0, str(parent_dir))
 else:
