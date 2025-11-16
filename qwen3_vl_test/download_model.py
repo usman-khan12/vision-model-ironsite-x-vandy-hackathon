@@ -6,7 +6,7 @@ from huggingface_hub import snapshot_download
 from transformers import AutoProcessor
 import sys
 
-def download_model(model_id="Qwen/Qwen3-VL-8B-Instruct"):
+def download_model(model_id="Qwen/Qwen3-VL-235B-A22B-Instruct"):
     """
     Download the model files with progress tracking.
     """

@@ -1,10 +1,10 @@
 """
-Test Qwen3-VL-8B-Instruct with Object Permanence Module
+Test Qwen3-VL-235B-A22B-Instruct with Object Permanence Module
 """
 import torch
 import argparse
 from pathlib import Path
-from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+from transformers import Qwen3VLMoeForConditionalGeneration, AutoProcessor
 import av
 import numpy as np
 
@@ -94,7 +94,7 @@ def load_qwen_model(device="auto", use_flash_attention=False):
             device = "cpu"
             print("Using CPU")
     
-    print(f"Loading Qwen3-VL-8B-Instruct model...")
+    print(f"Loading Qwen3-VL-235B-A22B-Instruct model...")
     print(f"Device: {device}")
     
     # Load model
@@ -108,16 +108,16 @@ def load_qwen_model(device="auto", use_flash_attention=False):
         print("Using Flash Attention 2")
     
     try:
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            "Qwen/Qwen3-VL-8B-Instruct",
+        model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
+            "Qwen/Qwen3-VL-235B-A22B-Instruct",
             **model_kwargs
         )
     except Exception as e:
         print(f"Error loading model: {e}")
         print("Trying without flash attention...")
         model_kwargs.pop("attn_implementation", None)
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            "Qwen/Qwen3-VL-8B-Instruct",
+        model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
+            "Qwen/Qwen3-VL-235B-A22B-Instruct",
             **model_kwargs
         )
     
@@ -125,7 +125,7 @@ def load_qwen_model(device="auto", use_flash_attention=False):
     if device != "cpu" and "device_map" not in model_kwargs:
         model = model.to(device)
     
-    processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-8B-Instruct")
+    processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-235B-A22B-Instruct")
     
     print("Model loaded successfully!")
     return model, processor, device
