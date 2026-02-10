@@ -1,2 +1,29 @@
+# Python
 __pycache__/
-/venv/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Model weights (downloaded at runtime)
+*.bin
+*.safetensors
+models_cache/
+.cache/

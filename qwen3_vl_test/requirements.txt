@@ -1,9 +1,0 @@
-torch>=2.0.0
-torchvision
-transformers>=4.57.0
-# For Qwen3-VL, need latest transformers from source:
-# pip install git+https://github.com/huggingface/transformers
-av
-numpy
-Pillow
-

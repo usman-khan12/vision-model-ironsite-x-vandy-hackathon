@@ -1,367 +1,317 @@
 """
-Spatial Memory Grid with Predictive Occupancy Maps
-Novel technique for maintaining object presence in spatial grid even when occluded
+Spatial Memory Grid with Predictive Occupancy Maps.
+Novel technique for maintaining object presence in spatial grid even when occluded.
 """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, Dict
-import math
+from typing import Optional, Tuple
 
 
 class SpatialMemoryGrid(nn.Module):
     """
     Maintains a 2D spatial grid that tracks object presence even when occluded.
     Each grid cell stores object features, IDs, and confidence scores.
+
+    Grid dimensions:
+        grid_state:      [batch, H, W, num_objects, feature_dim]
+        grid_confidence:  [batch, H, W, num_objects]
+        grid_temporal:    [batch, H, W, num_objects]
     """
-    
+
     def __init__(
         self,
         grid_size: Tuple[int, int] = (32, 32),
         feature_dim: int = 512,
         num_objects: int = 10,
         hidden_dim: int = 256,
-        decay_factor: float = 0.95
+        decay_factor: float = 0.95,
     ):
-        """
-        Args:
-            grid_size: (height, width) of the spatial grid
-            feature_dim: Dimension of object features
-            num_objects: Maximum number of objects to track
-            hidden_dim: Hidden dimension for processing
-            decay_factor: Decay factor for grid cell confidence over time
-        """
         super().__init__()
         self.grid_height, self.grid_width = grid_size
         self.feature_dim = feature_dim
         self.num_objects = num_objects
         self.decay_factor = decay_factor
-        
-        # Grid structure: [batch, H, W, num_objects, feature_dim + metadata]
-        # Metadata includes: confidence, object_id, temporal_consistency
-        
-        # Grid cell processor - processes object features in each cell
-        self.cell_processor = nn.Sequential(
-            nn.Linear(feature_dim + 3, hidden_dim),  # +3 for metadata (confidence, id, time)
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, feature_dim + 3)
-        )
-        
-        # Occupancy predictor - predicts where objects should be
+
+        # Occupancy predictor: features + current_pos + future_pos + velocity
         self.occupancy_predictor = nn.Sequential(
-            nn.Linear(feature_dim * 2 + 4, hidden_dim),  # features + position + velocity
+            nn.Linear(feature_dim + 6, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, self.grid_height * self.grid_width),
-            nn.Sigmoid()  # Occupancy probability
+            nn.Sigmoid(),
         )
-        
-        # Cross-reference matcher - matches observations to grid predictions
+
+        # Cross-reference matcher: obs_features + grid_features + position
         self.cross_reference = nn.Sequential(
-            nn.Linear(feature_dim * 2 + 2, hidden_dim),  # features + position
+            nn.Linear(feature_dim * 2 + 2, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, num_objects),
-            nn.Softmax(dim=-1)  # Matching probability per object
+            nn.Softmax(dim=-1),
         )
-        
-        # Grid state (not parameters, but state)
+
+        # Grid state (buffers, not parameters)
         self.grid_state: Optional[torch.Tensor] = None
         self.grid_confidence: Optional[torch.Tensor] = None
         self.grid_temporal: Optional[torch.Tensor] = None
-    
+
+    # ------------------------------------------------------------------
+    # Initialisation / reset
+    # ------------------------------------------------------------------
+
     def initialize_grid(self, batch_size: int, device: torch.device):
-        """Initialize the spatial memory grid."""
-        # Grid: [batch, H, W, num_objects, feature_dim]
         self.grid_state = torch.zeros(
-            batch_size, self.grid_height, self.grid_width, 
-            self.num_objects, self.feature_dim, device=device
+            batch_size,
+            self.grid_height,
+            self.grid_width,
+            self.num_objects,
+            self.feature_dim,
+            device=device,
         )
-        
-        # Confidence: [batch, H, W, num_objects]
         self.grid_confidence = torch.zeros(
-            batch_size, self.grid_height, self.grid_width, 
-            self.num_objects, device=device
+            batch_size,
+            self.grid_height,
+            self.grid_width,
+            self.num_objects,
+            device=device,
         )
-        
-        # Temporal consistency: [batch, H, W, num_objects] - tracks how long object has been at location
         self.grid_temporal = torch.zeros(
-            batch_size, self.grid_height, self.grid_width, 
-            self.num_objects, device=device
+            batch_size,
+            self.grid_height,
+            self.grid_width,
+            self.num_objects,
+            device=device,
         )
-    
-    def position_to_grid(self, positions: torch.Tensor, image_shape: Optional[Tuple[int, int]] = None) -> torch.Tensor:
+
+    def reset(self):
+        self.grid_state = None
+        self.grid_confidence = None
+        self.grid_temporal = None
+
+    # ------------------------------------------------------------------
+    # Coordinate helpers
+    # ------------------------------------------------------------------
+
+    def position_to_grid(
+        self,
+        positions: torch.Tensor,
+        image_shape: Optional[Tuple[int, int]] = None,
+    ) -> torch.Tensor:
         """
-        Convert object positions to grid coordinates.
-        
+        Convert (x, y) positions to integer (grid_w, grid_h) coordinates.
+
         Args:
-            positions: [batch, num_objects, 2] - (x, y) positions (normalized 0-1 or pixel coords)
-            image_shape: (height, width) of original image (if positions are in pixels)
-            
+            positions: [batch, num_objects, 2]  (x, y) in [0, 1] or pixels
+            image_shape: (height, width) if positions are in pixels
+
         Returns:
-            grid_coords: [batch, num_objects, 2] - (grid_h, grid_w) coordinates
+            [batch, num_objects, 2] as long — column 0 = grid_w, column 1 = grid_h
         """
-        batch_size, num_objects, _ = positions.shape
-        
-        # Normalize positions to [0, 1] if needed
+        pos = positions.clone().float()
         if image_shape is not None:
             h, w = image_shape
-            positions = positions.clone()
-            positions[:, :, 0] = positions[:, :, 0] / w  # x
-            positions[:, :, 1] = positions[:, :, 1] / h  # y
-        
-        # Convert to grid coordinates
-        grid_coords = positions.clone()
-        grid_coords[:, :, 0] = grid_coords[:, :, 0] * (self.grid_width - 1)  # x -> grid_w
-        grid_coords[:, :, 1] = grid_coords[:, :, 1] * (self.grid_height - 1)  # y -> grid_h
-        
-        # Clamp to valid grid range
-        grid_coords = torch.clamp(grid_coords, 0, max(self.grid_height, self.grid_width) - 1)
-        
-        return grid_coords.long()
-    
+            pos[..., 0] /= w
+            pos[..., 1] /= h
+
+        out = pos.clone()
+        out[..., 0] = pos[..., 0] * (self.grid_width - 1)
+        out[..., 1] = pos[..., 1] * (self.grid_height - 1)
+        out[..., 0].clamp_(0, self.grid_width - 1)
+        out[..., 1].clamp_(0, self.grid_height - 1)
+        return out.long()
+
+    def _flat_index(self, grid_coords: torch.Tensor):
+        """
+        Convert grid coords [batch, num_objects, 2] (w, h) to flat indices
+        into the [H, W] plane — useful for advanced indexing.
+
+        Returns:
+            grid_h: [batch, num_objects]   (long)
+            grid_w: [batch, num_objects]   (long)
+        """
+        return grid_coords[..., 1], grid_coords[..., 0]
+
+    # ------------------------------------------------------------------
+    # update_grid  (vectorised — no Python loops over batch / objects)
+    # ------------------------------------------------------------------
+
     def update_grid(
         self,
         object_features: torch.Tensor,
         positions: torch.Tensor,
         occlusion_factors: torch.Tensor,
-        object_ids: Optional[torch.Tensor] = None
+        object_ids: Optional[torch.Tensor] = None,
     ):
         """
-        Update the spatial memory grid with current observations.
-        
+        Update grid with current observations.
+
         Args:
-            object_features: [batch, num_objects, feature_dim] - Current object features
-            positions: [batch, num_objects, 2] - Object positions
-            occlusion_factors: [batch, num_objects] - Occlusion factors (0=visible, 1=occluded)
-            object_ids: [batch, num_objects] - Object IDs (optional)
+            object_features:  [batch, num_objects, feature_dim]
+            positions:         [batch, num_objects, 2]
+            occlusion_factors: [batch, num_objects]   0 = visible, 1 = occluded
         """
-        batch_size, num_objects, feature_dim = object_features.shape
+        B, N, D = object_features.shape
         device = object_features.device
-        
-        # Initialize grid if needed
+
         if self.grid_state is None:
-            self.initialize_grid(batch_size, device)
-        
-        # Convert positions to grid coordinates
-        grid_coords = self.position_to_grid(positions)  # [batch, num_objects, 2]
-        
-        # Update grid for each object
-        for obj_idx in range(num_objects):
-            for b_idx in range(batch_size):
-                grid_h = grid_coords[b_idx, obj_idx, 1].item()
-                grid_w = grid_coords[b_idx, obj_idx, 0].item()
-                occlusion = occlusion_factors[b_idx, obj_idx].item()
-                
-                # Get current cell state
-                current_features = self.grid_state[b_idx, grid_h, grid_w, obj_idx, :]
-                current_confidence = self.grid_confidence[b_idx, grid_h, grid_w, obj_idx].item()
-                
-                # Update based on visibility
-                if occlusion < 0.5:  # Object is visible
-                    # Strong update with observed features
-                    alpha = 0.8  # High update rate for visible objects
-                    new_features = (
-                        alpha * object_features[b_idx, obj_idx, :] +
-                        (1 - alpha) * current_features
-                    )
-                    new_confidence = min(1.0, current_confidence * 0.9 + 0.5)  # Increase confidence
-                    temporal_inc = 1.0
-                else:  # Object is occluded
-                    # Maintain "ghost" presence with decay
-                    alpha = 0.3  # Lower update rate for occluded objects
-                    new_features = (
-                        alpha * object_features[b_idx, obj_idx, :] +
-                        (1 - alpha) * current_features
-                    )
-                    new_confidence = current_confidence * self.decay_factor  # Decay confidence
-                    temporal_inc = 0.5
-                
-                # Update grid
-                self.grid_state[b_idx, grid_h, grid_w, obj_idx, :] = new_features
-                self.grid_confidence[b_idx, grid_h, grid_w, obj_idx] = new_confidence
-                self.grid_temporal[b_idx, grid_h, grid_w, obj_idx] += temporal_inc
-        
-        # Decay all cells (reduce confidence for cells not updated)
-        self.grid_confidence = self.grid_confidence * self.decay_factor
-    
+            self.initialize_grid(B, device)
+
+        grid_coords = self.position_to_grid(positions)  # [B, N, 2]
+        gh, gw = self._flat_index(grid_coords)  # each [B, N]
+
+        # Build batch + object index tensors for scatter
+        b_idx = torch.arange(B, device=device).unsqueeze(1).expand_as(gh)  # [B, N]
+        o_idx = torch.arange(N, device=device).unsqueeze(0).expand_as(gh)  # [B, N]
+
+        # Gather current grid values at the addressed cells
+        cur_feat = self.grid_state[b_idx, gh, gw, o_idx, :]  # [B, N, D]
+        cur_conf = self.grid_confidence[b_idx, gh, gw, o_idx]  # [B, N]
+
+        # Per-element alpha depending on visibility
+        visible = (occlusion_factors < 0.5).float()  # [B, N]
+        alpha = visible * 0.8 + (1.0 - visible) * 0.3  # [B, N]
+        alpha_f = alpha.unsqueeze(-1)  # [B, N, 1]
+
+        new_feat = alpha_f * object_features + (1.0 - alpha_f) * cur_feat
+
+        # Confidence: visible -> increase,  occluded -> decay
+        new_conf = visible * (cur_conf * 0.9 + 0.5).clamp(max=1.0) + (1.0 - visible) * (
+            cur_conf * self.decay_factor
+        )
+
+        # Temporal increment
+        temporal_inc = visible * 1.0 + (1.0 - visible) * 0.5
+
+        # Write back
+        self.grid_state[b_idx, gh, gw, o_idx, :] = new_feat
+        self.grid_confidence[b_idx, gh, gw, o_idx] = new_conf
+        self.grid_temporal[b_idx, gh, gw, o_idx] += temporal_inc
+
+        # Global confidence decay
+        self.grid_confidence *= self.decay_factor
+
+    # ------------------------------------------------------------------
+    # predict_occupancy  (batched over objects via reshape)
+    # ------------------------------------------------------------------
+
     def predict_occupancy(
         self,
         object_features: torch.Tensor,
         positions: torch.Tensor,
         velocities: Optional[torch.Tensor] = None,
-        num_frames_ahead: int = 1
+        num_frames_ahead: int = 1,
     ) -> torch.Tensor:
         """
-        Predict spatial occupancy maps for objects.
-        
-        Args:
-            object_features: [batch, num_objects, feature_dim] - Object features
-            positions: [batch, num_objects, 2] - Current positions
-            velocities: [batch, num_objects, 2] - Object velocities (optional)
-            num_frames_ahead: Number of frames to predict ahead
-            
+        Predict spatial occupancy maps for every object.
+
         Returns:
-            occupancy_maps: [batch, num_objects, H, W] - Predicted occupancy probabilities
+            [batch, num_objects, H, W]
         """
-        batch_size, num_objects, feature_dim = object_features.shape
-        device = object_features.device
-        
-        # Default velocities if not provided
+        B, N, D = object_features.shape
         if velocities is None:
             velocities = torch.zeros_like(positions)
-        
-        # Predict occupancy for each object
-        occupancy_maps = []
-        
-        for obj_idx in range(num_objects):
-            obj_features = object_features[:, obj_idx, :]  # [batch, feature_dim]
-            obj_pos = positions[:, obj_idx, :]  # [batch, 2]
-            obj_vel = velocities[:, obj_idx, :]  # [batch, 2]
-            
-            # Predict future position
-            future_pos = obj_pos + obj_vel * num_frames_ahead
-            
-            # Prepare input: features + current_pos + future_pos + velocity
-            predictor_input = torch.cat([
-                obj_features,
-                obj_pos,
-                future_pos,
-                obj_vel
-            ], dim=-1)  # [batch, feature_dim + 2 + 2 + 2]
-            
-            # Predict occupancy map
-            occupancy_flat = self.occupancy_predictor(predictor_input)  # [batch, H*W]
-            occupancy_map = occupancy_flat.view(batch_size, self.grid_height, self.grid_width)
-            occupancy_maps.append(occupancy_map)
-        
-        # Stack: [batch, num_objects, H, W]
-        occupancy_maps = torch.stack(occupancy_maps, dim=1)
-        
-        return occupancy_maps
-    
+
+        future_pos = positions + velocities * num_frames_ahead
+
+        # [B, N, D+6]
+        inp = torch.cat([object_features, positions, future_pos, velocities], dim=-1)
+        # Flatten batch*objects -> single batch for the MLP
+        flat = inp.reshape(B * N, -1)
+        occ_flat = self.occupancy_predictor(flat)  # [B*N, H*W]
+        return occ_flat.view(B, N, self.grid_height, self.grid_width)
+
+    # ------------------------------------------------------------------
+    # reidentify_object  (vectorised inner loop)
+    # ------------------------------------------------------------------
+
     def reidentify_object(
         self,
         new_features: torch.Tensor,
         new_position: torch.Tensor,
-        threshold: float = 0.3
+        threshold: float = 0.3,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Re-identify objects by matching new observations to grid predictions.
-        
-        Args:
-            new_features: [batch, num_objects, feature_dim] - Newly observed features
-            new_position: [batch, num_objects, 2] - New positions
-            threshold: Confidence threshold for matching
-            
+        Re-identify objects by matching new observations to grid state.
+
         Returns:
-            matched_ids: [batch, num_objects] - Matched object IDs
-            match_confidence: [batch, num_objects] - Match confidence scores
+            matched_ids:        [batch, num_objects]
+            match_confidence:   [batch, num_objects]
         """
-        batch_size, num_objects, feature_dim = new_features.shape
+        B, N, D = new_features.shape
         device = new_features.device
-        
+
         if self.grid_state is None:
-            # No grid history, return default IDs
-            return torch.arange(num_objects, device=device).unsqueeze(0).repeat(batch_size, 1), \
-                   torch.ones(batch_size, num_objects, device=device)
-        
-        matched_ids = []
-        match_confidences = []
-        
-        # Convert positions to grid coordinates
+            ids = torch.arange(N, device=device).unsqueeze(0).expand(B, -1)
+            return ids, torch.ones(B, N, device=device)
+
         grid_coords = self.position_to_grid(new_position)
-        
-        for obj_idx in range(num_objects):
-            obj_features = new_features[:, obj_idx, :]  # [batch, feature_dim]
-            obj_grid_h = grid_coords[:, obj_idx, 1]  # [batch]
-            obj_grid_w = grid_coords[:, obj_idx, 0]  # [batch]
-            
-            # Get grid features at this location for all tracked objects
-            batch_matches = []
-            batch_confs = []
-            
-            for b_idx in range(batch_size):
-                grid_h = obj_grid_h[b_idx].item()
-                grid_w = obj_grid_w[b_idx].item()
-                
-                # Get grid features for all objects at this location
-                grid_features = self.grid_state[b_idx, grid_h, grid_w, :, :]  # [num_objects, feature_dim]
-                grid_conf = self.grid_confidence[b_idx, grid_h, grid_w, :]  # [num_objects]
-                
-                # Match new features to grid features
-                match_input = torch.cat([
-                    obj_features[b_idx:b_idx+1, :].expand(self.num_objects, -1),  # [num_objects, feature_dim]
-                    grid_features,  # [num_objects, feature_dim]
-                    grid_coords[b_idx:b_idx+1, obj_idx:obj_idx+1, :].expand(self.num_objects, -1)  # [num_objects, 2]
-                ], dim=-1)  # [num_objects, feature_dim*2 + 2]
-                
-                match_probs = self.cross_reference(match_input)  # [num_objects, num_objects]
-                match_scores = match_probs.diag() * grid_conf  # Weight by grid confidence
-                
-                # Find best match
-                best_match = torch.argmax(match_scores)
-                best_conf = match_scores[best_match]
-                
-                batch_matches.append(best_match)
-                batch_confs.append(best_conf)
-            
-            matched_ids.append(torch.stack(batch_matches))
-            match_confidences.append(torch.stack(batch_confs))
-        
-        matched_ids = torch.stack(matched_ids, dim=1)  # [batch, num_objects]
-        match_confidences = torch.stack(match_confidences, dim=1)  # [batch, num_objects]
-        
-        return matched_ids, match_confidences
-    
+        gh, gw = self._flat_index(grid_coords)
+
+        b_idx = torch.arange(B, device=device).unsqueeze(1).expand(B, N)
+        o_all = torch.arange(self.num_objects, device=device)
+
+        matched_ids = torch.zeros(B, N, dtype=torch.long, device=device)
+        match_conf = torch.zeros(B, N, device=device)
+
+        for oi in range(N):
+            # Grid features at each batch element's cell for ALL tracked objects
+            # grid_state[b, gh[b,oi], gw[b,oi], :, :]  -> [B, num_objects, D]
+            g_feats = self.grid_state[b_idx[:, oi], gh[:, oi], gw[:, oi], :, :]
+            g_conf = self.grid_confidence[b_idx[:, oi], gh[:, oi], gw[:, oi], :]
+
+            obs = new_features[:, oi, :].unsqueeze(1).expand(-1, self.num_objects, -1)
+            pos = (
+                grid_coords[:, oi, :]
+                .unsqueeze(1)
+                .expand(-1, self.num_objects, -1)
+                .float()
+            )
+
+            match_in = torch.cat([obs, g_feats, pos], dim=-1)  # [B, num_obj, D*2+2]
+            flat_in = match_in.reshape(B * self.num_objects, -1)
+            match_out = self.cross_reference(flat_in)  # [B*num_obj, num_obj]
+            match_out = match_out.view(B, self.num_objects, self.num_objects)
+
+            diag = match_out[:, o_all, o_all]  # [B, num_objects]
+            scores = diag * g_conf  # [B, num_objects]
+
+            best = scores.argmax(dim=-1)  # [B]
+            matched_ids[:, oi] = best
+            match_conf[:, oi] = scores[torch.arange(B, device=device), best]
+
+        return matched_ids, match_conf
+
+    # ------------------------------------------------------------------
+    # get_grid_features_at_position  (vectorised)
+    # ------------------------------------------------------------------
+
     def get_grid_features_at_position(
         self,
         positions: torch.Tensor,
-        object_ids: Optional[torch.Tensor] = None
+        object_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Retrieve grid features at specific positions.
-        
-        Args:
-            positions: [batch, num_objects, 2] - Positions to query
-            object_ids: [batch, num_objects] - Object IDs (optional, uses all if None)
-            
-        Returns:
-            grid_features: [batch, num_objects, feature_dim] - Features from grid
-        """
-        if self.grid_state is None:
-            batch_size = positions.shape[0]
-            num_objects = positions.shape[1]
-            device = positions.device
-            return torch.zeros(batch_size, num_objects, self.feature_dim, device=device)
-        
-        batch_size, num_objects, _ = positions.shape
-        grid_coords = self.position_to_grid(positions)
-        
-        grid_features = []
-        for obj_idx in range(num_objects):
-            obj_features = []
-            for b_idx in range(batch_size):
-                grid_h = grid_coords[b_idx, obj_idx, 1].item()
-                grid_w = grid_coords[b_idx, obj_idx, 0].item()
-                
-                if object_ids is not None:
-                    obj_id = object_ids[b_idx, obj_idx].item()
-                    features = self.grid_state[b_idx, grid_h, grid_w, obj_id, :]
-                else:
-                    # Average over all objects at this location
-                    features = self.grid_state[b_idx, grid_h, grid_w, :, :].mean(dim=0)
-                
-                obj_features.append(features)
-            
-            grid_features.append(torch.stack(obj_features))
-        
-        return torch.stack(grid_features, dim=1)  # [batch, num_objects, feature_dim]
-    
-    def reset(self):
-        """Reset grid state."""
-        self.grid_state = None
-        self.grid_confidence = None
-        self.grid_temporal = None
+        Retrieve grid features at given positions.
 
+        Returns:
+            [batch, num_objects, feature_dim]
+        """
+        B, N, _ = positions.shape
+        device = positions.device
+
+        if self.grid_state is None:
+            return torch.zeros(B, N, self.feature_dim, device=device)
+
+        grid_coords = self.position_to_grid(positions)
+        gh, gw = self._flat_index(grid_coords)
+        b_idx = torch.arange(B, device=device).unsqueeze(1).expand(B, N)
+
+        if object_ids is not None:
+            oid = object_ids.long()
+            return self.grid_state[b_idx, gh, gw, oid, :]  # [B, N, D]
+
+        # No ids: average across all object slots at each cell
+        all_feats = self.grid_state[b_idx, gh, gw, :, :]  # [B, N, num_obj, D]
+        return all_feats.mean(dim=2)

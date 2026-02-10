@@ -1,12 +1,8 @@
 torch>=2.0.0
 torchvision
-transformers>=4.42.0
+transformers>=4.57.0
 huggingface-hub
 av
 numpy
 Pillow
 accelerate
-bitsandbytes
-protobuf
-sentencepiece
-peft

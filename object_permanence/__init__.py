@@ -1,6 +1,6 @@
 """
-Object Permanence Module for Video Models
-Implements Loci-Looped techniques for tracking objects through occlusions
+Object Permanence Module for Video Models.
+Implements Loci-Looped inspired techniques for tracking objects through occlusions.
 """
 
 from .occlusion_detector import OcclusionDetector
@@ -9,15 +9,17 @@ from .percept_gate_controller import PerceptGateController
 from .temporal_fusion import TemporalFusion
 from .object_tracker import ObjectTracker
 from .spatial_memory_grid import SpatialMemoryGrid
+from .feature_extractor import SimpleFeatureExtractor, ObjectFeatureExtractor
 from .integration import ObjectPermanenceModule
 
 __all__ = [
-    'OcclusionDetector',
-    'ObjectPredictor',
-    'PerceptGateController',
-    'TemporalFusion',
-    'ObjectTracker',
-    'SpatialMemoryGrid',
-    'ObjectPermanenceModule',
+    "OcclusionDetector",
+    "ObjectPredictor",
+    "PerceptGateController",
+    "TemporalFusion",
+    "ObjectTracker",
+    "SpatialMemoryGrid",
+    "SimpleFeatureExtractor",
+    "ObjectFeatureExtractor",
+    "ObjectPermanenceModule",
 ]
-
